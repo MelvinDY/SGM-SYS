@@ -1,0 +1,10 @@
+export { LoginPage } from './Login';
+export { DashboardPage } from './dashboard/DashboardPage';
+export { POSPage } from './pos/POSPage';
+export { InventoryPage } from './inventory/InventoryPage';
+export { BuybackPage } from './buyback/BuybackPage';
+export { ExchangePage } from './exchange/ExchangePage';
+export { GoldPricesPage } from './gold-prices/GoldPricesPage';
+export { ReportsPage } from './reports/ReportsPage';
+export { UsersPage } from './users/UsersPage';
+export { SettingsPage } from './settings/SettingsPage';
