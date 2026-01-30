@@ -1,12 +1,11 @@
-use crate::models::*;
 use sqlx::SqlitePool;
-use tauri::State;
 
 pub mod auth;
 pub mod inventory;
 pub mod transactions;
 pub mod gold_prices;
 pub mod reports;
+pub mod sync;
 
 // Re-export all commands
 pub use auth::*;
@@ -14,6 +13,7 @@ pub use inventory::*;
 pub use transactions::*;
 pub use gold_prices::*;
 pub use reports::*;
+pub use sync::*;
 
 // Database state wrapper
 pub struct DbPool(pub SqlitePool);

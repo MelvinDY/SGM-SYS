@@ -12,9 +12,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS branches (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            code TEXT UNIQUE,
             address TEXT,
             phone TEXT,
             is_active INTEGER DEFAULT 1,
+            salesforce_id TEXT UNIQUE,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT
         )
@@ -53,6 +55,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             address TEXT,
             notes TEXT,
             total_transactions INTEGER DEFAULT 0,
+            salesforce_id TEXT UNIQUE,
             created_at TEXT DEFAULT (datetime('now'))
         )
         "#,
@@ -89,6 +92,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             labor_cost INTEGER DEFAULT 0,
             images TEXT,
             is_active INTEGER DEFAULT 1,
+            salesforce_id TEXT UNIQUE,
             created_at TEXT DEFAULT (datetime('now'))
         )
         "#,
@@ -111,6 +115,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             supplier TEXT,
             notes TEXT,
             sold_at TEXT,
+            salesforce_id TEXT UNIQUE,
             created_at TEXT DEFAULT (datetime('now'))
         )
         "#,
@@ -129,6 +134,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             buy_price INTEGER NOT NULL,
             sell_price INTEGER NOT NULL,
             source TEXT,
+            salesforce_id TEXT UNIQUE,
             created_at TEXT DEFAULT (datetime('now')),
             UNIQUE(date, gold_type, purity)
         )
@@ -152,6 +158,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             total_amount INTEGER NOT NULL,
             notes TEXT,
             status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'void')),
+            salesforce_id TEXT UNIQUE,
             created_at TEXT DEFAULT (datetime('now'))
         )
         "#,
@@ -169,7 +176,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             quantity INTEGER DEFAULT 1,
             unit_price INTEGER NOT NULL,
             subtotal INTEGER NOT NULL,
-            gold_price_ref INTEGER
+            gold_price_ref INTEGER,
+            salesforce_id TEXT UNIQUE
         )
         "#,
     )
@@ -203,14 +211,59 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             table_name TEXT NOT NULL,
             record_id TEXT NOT NULL,
             action TEXT NOT NULL CHECK (action IN ('insert', 'update', 'delete')),
+            payload TEXT,
             synced INTEGER DEFAULT 0,
             synced_at TEXT,
+            error_message TEXT,
+            retry_count INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         )
         "#,
     )
     .execute(pool)
     .await?;
+
+    // Create sync_config table for Salesforce credentials
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS sync_config (
+            id TEXT PRIMARY KEY DEFAULT 'default',
+            sf_client_id TEXT,
+            sf_client_secret TEXT,
+            sf_username TEXT,
+            sf_password TEXT,
+            sf_security_token TEXT,
+            sf_instance_url TEXT DEFAULT 'https://login.salesforce.com',
+            is_sandbox INTEGER DEFAULT 1,
+            sync_enabled INTEGER DEFAULT 0,
+            sync_interval_minutes INTEGER DEFAULT 15,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Create sync_metadata table for tracking sync timestamps per table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS sync_metadata (
+            table_name TEXT PRIMARY KEY,
+            last_pull_at TEXT,
+            last_push_at TEXT,
+            last_full_sync_at TEXT,
+            records_pulled INTEGER DEFAULT 0,
+            records_pushed INTEGER DEFAULT 0
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Run migrations for existing databases (add new columns)
+    // This MUST run before any indexes on new columns are created
+    run_column_migrations(pool).await?;
 
     // Create indexes
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_inventory_barcode ON inventory(barcode)")
@@ -231,9 +284,105 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_log_synced ON sync_log(synced)")
         .execute(pool)
         .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_log_table_record ON sync_log(table_name, record_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_inventory_salesforce ON inventory(salesforce_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_transactions_salesforce ON transactions(salesforce_id)")
+        .execute(pool)
+        .await?;
 
     // Insert default data if tables are empty
     insert_default_data(pool).await?;
+
+    Ok(())
+}
+
+/// Add new columns to existing tables (for database upgrades)
+async fn run_column_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    // Helper to check if column exists
+    async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
+        let query = format!("SELECT 1 FROM pragma_table_info('{}') WHERE name = ?", table);
+        sqlx::query(&query)
+            .bind(column)
+            .fetch_optional(pool)
+            .await
+            .map(|r| r.is_some())
+            .unwrap_or(false)
+    }
+
+    // Add salesforce_id to branches
+    if !column_exists(pool, "branches", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE branches ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+    if !column_exists(pool, "branches", "code").await {
+        let _ = sqlx::query("ALTER TABLE branches ADD COLUMN code TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add salesforce_id to customers
+    if !column_exists(pool, "customers", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE customers ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add salesforce_id to products
+    if !column_exists(pool, "products", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE products ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add salesforce_id to inventory
+    if !column_exists(pool, "inventory", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE inventory ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add salesforce_id to gold_prices
+    if !column_exists(pool, "gold_prices", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE gold_prices ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add salesforce_id to transactions
+    if !column_exists(pool, "transactions", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE transactions ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add salesforce_id to transaction_items
+    if !column_exists(pool, "transaction_items", "salesforce_id").await {
+        let _ = sqlx::query("ALTER TABLE transaction_items ADD COLUMN salesforce_id TEXT UNIQUE")
+            .execute(pool)
+            .await;
+    }
+
+    // Add new columns to sync_log
+    if !column_exists(pool, "sync_log", "payload").await {
+        let _ = sqlx::query("ALTER TABLE sync_log ADD COLUMN payload TEXT")
+            .execute(pool)
+            .await;
+    }
+    if !column_exists(pool, "sync_log", "error_message").await {
+        let _ = sqlx::query("ALTER TABLE sync_log ADD COLUMN error_message TEXT")
+            .execute(pool)
+            .await;
+    }
+    if !column_exists(pool, "sync_log", "retry_count").await {
+        let _ = sqlx::query("ALTER TABLE sync_log ADD COLUMN retry_count INTEGER DEFAULT 0")
+            .execute(pool)
+            .await;
+    }
 
     Ok(())
 }
@@ -248,8 +397,8 @@ async fn insert_default_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         // Insert default branch
         sqlx::query(
             r#"
-            INSERT INTO branches (id, name, address, phone, is_active)
-            VALUES ('default', 'Toko Emas Sejahtera', 'Jl. Raya No. 123, Jakarta', '021-1234567', 1)
+            INSERT INTO branches (id, name, code, address, phone, is_active)
+            VALUES ('default', 'Toko Emas Sejahtera', 'TES-001', 'Jl. Raya No. 123, Jakarta', '021-1234567', 1)
             "#,
         )
         .execute(pool)

@@ -7,16 +7,15 @@ pub async fn login(
     pool: State<'_, DbPool>,
     request: LoginRequest,
 ) -> Result<ApiResponse<LoginResponse>, String> {
-    let user: Option<User> = sqlx::query_as!(
-        User,
+    let user: Option<User> = sqlx::query_as::<_, User>(
         r#"
         SELECT id, branch_id, username, password_hash, full_name, role,
-               is_active as "is_active: bool", last_login, created_at
+               is_active, last_login, created_at
         FROM users
         WHERE username = ? AND is_active = 1
         "#,
-        request.username
     )
+    .bind(&request.username)
     .fetch_optional(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -29,20 +28,25 @@ pub async fn login(
 
             if valid {
                 // Update last login
-                let now = chrono::Utc::now().to_rfc3339();
+                let now = chrono::Utc::now();
+                let now_str = now.to_rfc3339();
                 sqlx::query("UPDATE users SET last_login = ? WHERE id = ?")
-                    .bind(&now)
+                    .bind(&now_str)
                     .bind(&user.id)
                     .execute(&pool.0)
                     .await
                     .map_err(|e| e.to_string())?;
 
                 // Generate token (simple for now, should use JWT in production)
-                let token = format!("token-{}-{}", user.id, chrono::Utc::now().timestamp());
+                let token = format!("token-{}-{}", user.id, now.timestamp());
+
+                // Token expires in 24 hours
+                let expires_at = (now + chrono::Duration::hours(24)).to_rfc3339();
 
                 Ok(ApiResponse::success(LoginResponse {
                     user: UserResponse::from(user),
                     token,
+                    expires_at,
                 }))
             } else {
                 Ok(ApiResponse::error("Invalid password"))
@@ -54,14 +58,13 @@ pub async fn login(
 
 #[tauri::command]
 pub async fn get_users(pool: State<'_, DbPool>) -> Result<ApiResponse<Vec<UserResponse>>, String> {
-    let users: Vec<User> = sqlx::query_as!(
-        User,
+    let users: Vec<User> = sqlx::query_as::<_, User>(
         r#"
         SELECT id, branch_id, username, password_hash, full_name, role,
-               is_active as "is_active: bool", last_login, created_at
+               is_active, last_login, created_at
         FROM users
         ORDER BY created_at DESC
-        "#
+        "#,
     )
     .fetch_all(&pool.0)
     .await
@@ -99,15 +102,14 @@ pub async fn create_user(
     .await
     .map_err(|e| e.to_string())?;
 
-    let user: User = sqlx::query_as!(
-        User,
+    let user: User = sqlx::query_as::<_, User>(
         r#"
         SELECT id, branch_id, username, password_hash, full_name, role,
-               is_active as "is_active: bool", last_login, created_at
+               is_active, last_login, created_at
         FROM users WHERE id = ?
         "#,
-        id
     )
+    .bind(&id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;

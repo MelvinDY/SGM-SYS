@@ -6,9 +6,8 @@ use tauri::State;
 pub async fn get_categories(
     pool: State<'_, DbPool>,
 ) -> Result<ApiResponse<Vec<Category>>, String> {
-    let categories: Vec<Category> = sqlx::query_as!(
-        Category,
-        "SELECT id, name, description, created_at FROM categories ORDER BY name"
+    let categories: Vec<Category> = sqlx::query_as::<_, Category>(
+        "SELECT id, name, description, created_at FROM categories ORDER BY name",
     )
     .fetch_all(&pool.0)
     .await
@@ -19,15 +18,14 @@ pub async fn get_categories(
 
 #[tauri::command]
 pub async fn get_products(pool: State<'_, DbPool>) -> Result<ApiResponse<Vec<Product>>, String> {
-    let products: Vec<Product> = sqlx::query_as!(
-        Product,
+    let products: Vec<Product> = sqlx::query_as::<_, Product>(
         r#"
         SELECT id, category_id, sku, name, description, gold_type, gold_purity,
-               weight_gram, labor_cost, images, is_active as "is_active: bool", created_at
+               weight_gram, labor_cost, images, is_active, created_at
         FROM products
         WHERE is_active = 1
         ORDER BY name
-        "#
+        "#,
     )
     .fetch_all(&pool.0)
     .await
@@ -69,15 +67,14 @@ pub async fn create_product(
     .await
     .map_err(|e| e.to_string())?;
 
-    let product: Product = sqlx::query_as!(
-        Product,
+    let product: Product = sqlx::query_as::<_, Product>(
         r#"
         SELECT id, category_id, sku, name, description, gold_type, gold_purity,
-               weight_gram, labor_cost, images, is_active as "is_active: bool", created_at
+               weight_gram, labor_cost, images, is_active, created_at
         FROM products WHERE id = ?
         "#,
-        id
     )
+    .bind(&id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -90,60 +87,40 @@ pub async fn get_inventory(
     pool: State<'_, DbPool>,
     status: Option<String>,
 ) -> Result<ApiResponse<Vec<Inventory>>, String> {
-    let query = match status {
+    // First get all inventory items
+    let inv_query = match &status {
         Some(s) => format!(
-            r#"
-            SELECT i.id, i.product_id, i.branch_id, i.barcode, i.status, i.location,
-                   i.purchase_price, i.purchase_date, i.supplier, i.notes, i.sold_at, i.created_at
-            FROM inventory i
-            WHERE i.status = '{}'
-            ORDER BY i.created_at DESC
-            "#,
+            "SELECT id, product_id, branch_id, barcode, status, location, purchase_price, purchase_date, supplier, notes, sold_at, created_at FROM inventory WHERE status = '{}' ORDER BY created_at DESC",
             s
         ),
-        None => r#"
-            SELECT id, product_id, branch_id, barcode, status, location,
-                   purchase_price, purchase_date, supplier, notes, sold_at, created_at
-            FROM inventory
-            ORDER BY created_at DESC
-            "#
-        .to_string(),
+        None => "SELECT id, product_id, branch_id, barcode, status, location, purchase_price, purchase_date, supplier, notes, sold_at, created_at FROM inventory ORDER BY created_at DESC".to_string(),
     };
 
-    let rows = sqlx::query_as::<_, (
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        i32,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    )>(&query)
+    let inventory_items: Vec<Inventory> = sqlx::query_as::<_, Inventory>(&inv_query)
+        .fetch_all(&pool.0)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Get all products for joining
+    let products: Vec<Product> = sqlx::query_as::<_, Product>(
+        "SELECT id, category_id, sku, name, description, gold_type, gold_purity, weight_gram, labor_cost, images, is_active, created_at FROM products",
+    )
     .fetch_all(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
 
-    let inventory: Vec<Inventory> = rows
+    // Create a map for quick lookup
+    let product_map: std::collections::HashMap<String, Product> = products
         .into_iter()
-        .map(|row| Inventory {
-            id: row.0,
-            product_id: row.1,
-            branch_id: row.2,
-            barcode: row.3,
-            status: row.4,
-            location: row.5,
-            purchase_price: row.6,
-            purchase_date: row.7,
-            supplier: row.8,
-            notes: row.9,
-            sold_at: row.10,
-            created_at: row.11,
-            product: None,
+        .map(|p| (p.id.clone(), p))
+        .collect();
+
+    // Join products to inventory
+    let inventory: Vec<Inventory> = inventory_items
+        .into_iter()
+        .map(|mut inv| {
+            inv.product = product_map.get(&inv.product_id).cloned();
+            inv
         })
         .collect();
 
@@ -155,23 +132,18 @@ pub async fn scan_barcode(
     pool: State<'_, DbPool>,
     barcode: String,
 ) -> Result<ApiResponse<Option<Inventory>>, String> {
-    let inventory: Option<Inventory> = sqlx::query_as!(
-        Inventory,
+    let inventory: Option<Inventory> = sqlx::query_as::<_, Inventory>(
         r#"
         SELECT id, product_id, branch_id, barcode, status, location,
                purchase_price, purchase_date, supplier, notes, sold_at, created_at
         FROM inventory
         WHERE barcode = ?
         "#,
-        barcode
     )
+    .bind(&barcode)
     .fetch_optional(&pool.0)
     .await
-    .map_err(|e| e.to_string())?
-    .map(|mut inv| {
-        inv.product = None;
-        inv
-    });
+    .map_err(|e| e.to_string())?;
 
     Ok(ApiResponse::success(inventory))
 }
@@ -203,15 +175,14 @@ pub async fn add_inventory(
     .await
     .map_err(|e| e.to_string())?;
 
-    let inventory: Inventory = sqlx::query_as!(
-        Inventory,
+    let inventory: Inventory = sqlx::query_as::<_, Inventory>(
         r#"
         SELECT id, product_id, branch_id, barcode, status, location,
                purchase_price, purchase_date, supplier, notes, sold_at, created_at
         FROM inventory WHERE id = ?
         "#,
-        id
     )
+    .bind(&id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -284,4 +255,140 @@ pub async fn get_inventory_stats(
         weight.0.unwrap_or(0.0),
         value.0.unwrap_or(0),
     )))
+}
+
+#[tauri::command]
+pub async fn update_inventory(
+    pool: State<'_, DbPool>,
+    inventory_id: String,
+    location: Option<String>,
+    purchase_price: Option<i32>,
+    supplier: Option<String>,
+    notes: Option<String>,
+) -> Result<ApiResponse<Inventory>, String> {
+    // Build dynamic update query
+    let mut updates = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(loc) = location {
+        updates.push("location = ?");
+        params.push(loc);
+    }
+    if let Some(price) = purchase_price {
+        updates.push("purchase_price = ?");
+        params.push(price.to_string());
+    }
+    if let Some(sup) = supplier {
+        updates.push("supplier = ?");
+        params.push(sup);
+    }
+    if let Some(n) = notes {
+        updates.push("notes = ?");
+        params.push(n);
+    }
+
+    if updates.is_empty() {
+        return Ok(ApiResponse::error("No fields to update"));
+    }
+
+    let query = format!(
+        "UPDATE inventory SET {} WHERE id = ?",
+        updates.join(", ")
+    );
+
+    let mut q = sqlx::query(&query);
+    for param in &params {
+        q = q.bind(param);
+    }
+    q = q.bind(&inventory_id);
+
+    q.execute(&pool.0).await.map_err(|e| e.to_string())?;
+
+    // Fetch updated inventory
+    let inventory: Inventory = sqlx::query_as::<_, Inventory>(
+        r#"
+        SELECT id, product_id, branch_id, barcode, status, location,
+               purchase_price, purchase_date, supplier, notes, sold_at, created_at
+        FROM inventory WHERE id = ?
+        "#,
+    )
+    .bind(&inventory_id)
+    .fetch_one(&pool.0)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(ApiResponse::success(inventory))
+}
+
+#[tauri::command]
+pub async fn delete_inventory(
+    pool: State<'_, DbPool>,
+    inventory_id: String,
+) -> Result<ApiResponse<bool>, String> {
+    // Check if inventory exists and is available (not sold)
+    let inventory: Option<Inventory> = sqlx::query_as::<_, Inventory>(
+        r#"
+        SELECT id, product_id, branch_id, barcode, status, location,
+               purchase_price, purchase_date, supplier, notes, sold_at, created_at
+        FROM inventory WHERE id = ?
+        "#,
+    )
+    .bind(&inventory_id)
+    .fetch_optional(&pool.0)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match inventory {
+        Some(inv) => {
+            if inv.status != "available" {
+                return Ok(ApiResponse::error("Cannot delete inventory that is not available"));
+            }
+
+            sqlx::query("DELETE FROM inventory WHERE id = ?")
+                .bind(&inventory_id)
+                .execute(&pool.0)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            Ok(ApiResponse::success(true))
+        }
+        None => Ok(ApiResponse::error("Inventory not found")),
+    }
+}
+
+/// Generate a barcode in format: EM-[CAT]-[SEQ]-[CHK]
+/// where CAT is category code, SEQ is sequential number, CHK is Luhn checksum
+#[tauri::command]
+pub async fn generate_barcode(
+    pool: State<'_, DbPool>,
+    category_code: String,
+) -> Result<ApiResponse<String>, String> {
+    // Get next sequence number for this category
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM inventory WHERE barcode LIKE ?",
+    )
+    .bind(format!("EM-{}-%%", category_code))
+    .fetch_one(&pool.0)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let sequence = count.0 + 1;
+    let seq_str = format!("{:06}", sequence);
+
+    // Calculate Luhn checksum
+    let digits: Vec<u32> = seq_str.chars().filter_map(|c| c.to_digit(10)).collect();
+    let mut sum = 0u32;
+    for (i, &digit) in digits.iter().rev().enumerate() {
+        if i % 2 == 1 {
+            let doubled = digit * 2;
+            sum += if doubled > 9 { doubled - 9 } else { doubled };
+        } else {
+            sum += digit;
+        }
+    }
+    let checksum = (10 - (sum % 10)) % 10;
+
+    let barcode = format!("EM-{}-{}-{}", category_code, seq_str, checksum);
+
+    Ok(ApiResponse::success(barcode))
 }

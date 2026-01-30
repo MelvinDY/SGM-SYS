@@ -1,8 +1,11 @@
 mod commands;
 mod db;
 mod models;
+mod salesforce;
+mod sync;
 
-use commands::DbPool;
+use commands::{DbPool, SyncState};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -16,6 +19,7 @@ pub fn run() {
                     .await
                     .expect("Failed to initialize database");
                 app_handle.manage(DbPool(pool));
+                app_handle.manage(SyncState::new());
             });
             Ok(())
         })
@@ -34,7 +38,10 @@ pub fn run() {
             commands::scan_barcode,
             commands::add_inventory,
             commands::update_inventory_location,
+            commands::update_inventory,
+            commands::delete_inventory,
             commands::get_inventory_stats,
+            commands::generate_barcode,
             // Transaction commands
             commands::create_transaction,
             commands::process_payment,
@@ -54,6 +61,15 @@ pub fn run() {
             commands::get_sales_report,
             commands::get_daily_summary,
             commands::get_stock_report,
+            // Sync commands
+            commands::get_sync_config,
+            commands::save_sync_config,
+            commands::test_sf_connection,
+            commands::get_sync_status,
+            commands::manual_sync,
+            commands::pull_gold_prices_from_sf,
+            commands::pull_inventory_from_sf,
+            commands::toggle_sync_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

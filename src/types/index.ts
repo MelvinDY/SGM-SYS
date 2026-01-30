@@ -93,12 +93,14 @@ export interface Transaction {
   type: 'sale' | 'buyback' | 'exchange';
   subtotal: number;
   discount: number;
-  total_amount: number;
+  tax: number;
+  total: number;
   notes?: string;
   status: 'pending' | 'completed' | 'void';
   created_at: string;
-  // Joined fields
+  // Joined/computed fields
   customer?: Customer;
+  customer_name?: string;
   user?: User;
   items?: TransactionItem[];
   payments?: Payment[];
@@ -184,6 +186,7 @@ export interface DailySummary {
   cash_received: number;
   qris_received: number;
   bank_transfer_received: number;
+  payment_breakdown?: Record<string, number>;
 }
 
 // API Response types
@@ -202,6 +205,7 @@ export interface LoginRequest {
 export interface LoginResponse {
   user: User;
   token: string;
+  expires_at: string;
 }
 
 export interface Session {
@@ -240,4 +244,57 @@ export interface AppSettings {
   printer: PrinterSettings;
   payment: PaymentSettings;
   sync: SyncSettings;
+}
+
+// Salesforce Sync types
+export interface SyncConfig {
+  id: string;
+  sf_client_id?: string;
+  sf_client_secret?: string;
+  sf_username?: string;
+  sf_password?: string;
+  sf_security_token?: string;
+  sf_instance_url?: string;
+  is_sandbox: boolean;
+  sync_enabled: boolean;
+  sync_interval_minutes: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface SaveSyncConfigRequest {
+  sf_client_id: string;
+  sf_client_secret: string;
+  sf_username: string;
+  sf_password: string;
+  sf_security_token: string;
+  sf_instance_url?: string;
+  is_sandbox: boolean;
+  sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+export interface SyncStatus {
+  is_connected: boolean;
+  sync_enabled: boolean;
+  last_sync_at?: string;
+  pending_changes: number;
+  error_message?: string;
+}
+
+export interface SyncResult {
+  success: boolean;
+  records_pushed: number;
+  records_pulled: number;
+  errors: string[];
+  completed_at: string;
+}
+
+export interface SyncMetadata {
+  table_name: string;
+  last_pull_at?: string;
+  last_push_at?: string;
+  last_full_sync_at?: string;
+  records_pulled: number;
+  records_pushed: number;
 }

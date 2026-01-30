@@ -1,103 +1,69 @@
 import { useState, useRef, useEffect } from 'react';
-import { Search, Barcode, Trash2, User, CreditCard } from 'lucide-react';
+import { Search, Barcode, Trash2, User, CreditCard, Loader2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
+import { ReceiptPreview } from '../../components/receipt/ReceiptPreview';
 import { formatCurrency, formatWeight, getPurityLabel, getGoldTypeLabel } from '../../lib/utils';
 import { useCartStore } from '../../store/cartStore';
-import type { Inventory, Customer } from '../../types';
+import { useInventory, useScanBarcode } from '../../hooks/useInventory';
+import { useGoldPriceLookup } from '../../hooks/useGoldPrices';
+import { useCheckout } from '../../hooks/useTransactions';
+import { useSearchCustomer } from '../../hooks/useCustomers';
+import { useAuth } from '../../hooks/useAuth';
+import type { Inventory, Customer, CartItem } from '../../types';
 
-// Demo inventory data
-const demoInventory: Inventory[] = [
-  {
-    id: '1',
-    product_id: '1',
-    branch_id: '1',
-    barcode: 'EM-CN-000001-7',
-    status: 'available',
-    location: 'Etalase',
-    purchase_price: 4800000,
-    created_at: new Date().toISOString(),
-    product: {
-      id: '1',
-      category_id: '1',
-      name: 'Cincin Polos',
-      gold_type: 'LM',
-      gold_purity: 750,
-      weight_gram: 5,
-      labor_cost: 200000,
-      is_active: true,
-      created_at: new Date().toISOString(),
-    },
-  },
-  {
-    id: '2',
-    product_id: '2',
-    branch_id: '1',
-    barcode: 'EM-KL-000001-3',
-    status: 'available',
-    location: 'Etalase',
-    purchase_price: 9600000,
-    created_at: new Date().toISOString(),
-    product: {
-      id: '2',
-      category_id: '2',
-      name: 'Kalung Rantai',
-      gold_type: 'LM',
-      gold_purity: 750,
-      weight_gram: 10,
-      labor_cost: 350000,
-      is_active: true,
-      created_at: new Date().toISOString(),
-    },
-  },
-  {
-    id: '3',
-    product_id: '3',
-    branch_id: '1',
-    barcode: 'EM-GL-000001-9',
-    status: 'available',
-    location: 'Etalase',
-    purchase_price: 3800000,
-    created_at: new Date().toISOString(),
-    product: {
-      id: '3',
-      category_id: '3',
-      name: 'Gelang Keroncong',
-      gold_type: 'Lokal',
-      gold_purity: 375,
-      weight_gram: 8,
-      labor_cost: 150000,
-      is_active: true,
-      created_at: new Date().toISOString(),
-    },
-  },
-];
-
-// Gold price per gram (would come from gold_prices table)
-const GOLD_PRICE_PER_GRAM: Record<string, Record<number, number>> = {
-  LM: { 999: 1250000, 750: 1050000, 375: 525000 },
-  UBS: { 999: 1245000, 750: 1045000, 375: 522000 },
-  Lokal: { 999: 1200000, 750: 980000, 375: 490000 },
-};
-
-function calculateSellPrice(item: Inventory): number {
+function calculateSellPrice(
+  item: Inventory,
+  getPricePerGram: (goldType: string, purity: number) => number | null
+): number {
   if (!item.product) return 0;
-  const pricePerGram = GOLD_PRICE_PER_GRAM[item.product.gold_type]?.[item.product.gold_purity] || 0;
+  const pricePerGram = getPricePerGram(item.product.gold_type, item.product.gold_purity);
+  if (!pricePerGram) return 0;
   return Math.round(item.product.weight_gram * pricePerGram + item.product.labor_cost);
 }
 
 export function POSPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'qris' | 'bank_transfer'>('cash');
   const [cashReceived, setCashReceived] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [customerSearchTerm, setCustomerSearchTerm] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  // Store receipt data after successful payment
+  const [receiptData, setReceiptData] = useState<{
+    transaction: {
+      invoice_no: string;
+      type: 'sale' | 'buyback' | 'exchange';
+      subtotal: number;
+      discount: number;
+      total: number;
+      created_at: string;
+      customer_name?: string;
+    };
+    items: CartItem[];
+    payment: {
+      method: 'cash' | 'qris' | 'bank_transfer';
+      amount: number;
+    };
+    cashReceived?: number;
+  } | null>(null);
+
+  const { user } = useAuth();
   const { cart, addItem, removeItem, setDiscount, clearCart } = useCartStore();
+
+  // Data hooks
+  const { data: inventory, isLoading: inventoryLoading } = useInventory('available');
+  const { getPricePerGram, isLoading: pricesLoading } = useGoldPriceLookup();
+  const scanBarcode = useScanBarcode();
+  const { checkout } = useCheckout();
+  const { data: searchedCustomers } = useSearchCustomer(customerSearchTerm);
 
   // Focus on search input for barcode scanning
   useEffect(() => {
@@ -105,44 +71,111 @@ export function POSPage() {
   }, []);
 
   // Filter inventory based on search
-  const filteredInventory = demoInventory.filter(
+  const filteredInventory = inventory?.filter(
     (item) =>
-      item.status === 'available' &&
-      (item.barcode.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        item.product?.name.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+      item.barcode.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      item.product?.name.toLowerCase().includes(searchTerm.toLowerCase())
+  ) || [];
 
   const handleAddToCart = (item: Inventory) => {
-    const sellPrice = calculateSellPrice(item);
+    const sellPrice = calculateSellPrice(item, getPricePerGram);
     addItem(item, sellPrice);
     setSearchTerm('');
     searchInputRef.current?.focus();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && filteredInventory.length === 1) {
-      handleAddToCart(filteredInventory[0]);
+  const handleKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      // Try to scan barcode first
+      if (searchTerm.startsWith('EM-')) {
+        try {
+          const result = await scanBarcode.mutateAsync(searchTerm);
+          if (result) {
+            handleAddToCart(result);
+            return;
+          }
+        } catch (error) {
+          console.error('Barcode scan error:', error);
+        }
+      }
+      // Fallback to filtered inventory
+      if (filteredInventory.length === 1) {
+        handleAddToCart(filteredInventory[0]);
+      }
     }
   };
 
-  const handleProcessPayment = () => {
-    // TODO: Process payment via Tauri command
-    console.log('Processing payment...', {
-      cart,
-      paymentMethod,
-      cashReceived: paymentMethod === 'cash' ? parseInt(cashReceived.replace(/\D/g, '')) : 0,
-      customer: selectedCustomer,
-    });
+  const handleProcessPayment = async () => {
+    if (!user) return;
 
-    // Clear cart after successful payment
-    clearCart();
-    setShowPaymentModal(false);
-    setCashReceived('');
-    setSelectedCustomer(null);
+    setIsProcessing(true);
+    try {
+      const result = await checkout({
+        transactionRequest: {
+          type: 'sale',
+          customer_id: selectedCustomer?.id,
+          items: cart.items.map((item) => ({
+            inventory_id: item.inventory.id,
+            unit_price: item.unit_price,
+            discount: 0,
+          })),
+          subtotal: cart.subtotal,
+          discount: cart.discount,
+          tax: 0,
+          total: cart.total,
+        },
+        paymentMethod,
+        paymentAmount: paymentMethod === 'cash' ? cashReceivedAmount : cart.total,
+        userId: user.id,
+        branchId: user.branch_id,
+      });
+
+      // Store receipt data
+      setReceiptData({
+        transaction: {
+          invoice_no: result.transaction.invoice_no,
+          type: 'sale',
+          subtotal: cart.subtotal,
+          discount: cart.discount,
+          total: cart.total,
+          created_at: result.transaction.created_at,
+          customer_name: selectedCustomer?.name,
+        },
+        items: [...cart.items], // Clone cart items before clearing
+        payment: {
+          method: paymentMethod,
+          amount: paymentMethod === 'cash' ? cashReceivedAmount : cart.total,
+        },
+        cashReceived: paymentMethod === 'cash' ? cashReceivedAmount : undefined,
+      });
+
+      // Close payment modal and show receipt
+      setShowPaymentModal(false);
+      setShowReceiptModal(true);
+
+      // Clear cart after successful payment
+      clearCart();
+      setCashReceived('');
+      setSelectedCustomer(null);
+      setCustomerSearchTerm('');
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('Gagal memproses pembayaran. Silakan coba lagi.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleCloseReceipt = () => {
+    setShowReceiptModal(false);
+    setReceiptData(null);
+    searchInputRef.current?.focus();
   };
 
   const cashReceivedAmount = parseInt(cashReceived.replace(/\D/g, '')) || 0;
   const change = cashReceivedAmount - cart.total;
+
+  const isLoading = inventoryLoading || pricesLoading;
 
   return (
     <div className="h-[calc(100vh-8rem)] flex gap-6">
@@ -165,36 +198,42 @@ export function POSPage() {
             </div>
           </CardHeader>
           <CardContent className="flex-1 overflow-y-auto">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {filteredInventory.map((item) => (
-                <div
-                  key={item.id}
-                  className="p-4 border border-gray-200 rounded-lg hover:border-amber-500 hover:bg-amber-50 cursor-pointer transition-colors"
-                  onClick={() => handleAddToCart(item)}
-                >
-                  <div className="flex justify-between items-start mb-2">
-                    <h3 className="font-medium text-gray-900">{item.product?.name}</h3>
-                    <Badge variant="success">Ready</Badge>
-                  </div>
-                  <div className="space-y-1 text-sm text-gray-600">
-                    <p className="font-mono text-xs">{item.barcode}</p>
-                    <p>
-                      {getGoldTypeLabel(item.product?.gold_type || '')} -{' '}
-                      {getPurityLabel(item.product?.gold_purity || 0)}
+            {isLoading ? (
+              <div className="h-full flex items-center justify-center">
+                <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {filteredInventory.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-4 border border-gray-200 rounded-lg hover:border-amber-500 hover:bg-amber-50 cursor-pointer transition-colors"
+                    onClick={() => handleAddToCart(item)}
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <h3 className="font-medium text-gray-900">{item.product?.name}</h3>
+                      <Badge variant="success">Ready</Badge>
+                    </div>
+                    <div className="space-y-1 text-sm text-gray-600">
+                      <p className="font-mono text-xs">{item.barcode}</p>
+                      <p>
+                        {getGoldTypeLabel(item.product?.gold_type || '')} -{' '}
+                        {getPurityLabel(item.product?.gold_purity || 0)}
+                      </p>
+                      <p>{formatWeight(item.product?.weight_gram || 0)}</p>
+                    </div>
+                    <p className="mt-2 text-lg font-bold text-amber-600">
+                      {formatCurrency(calculateSellPrice(item, getPricePerGram))}
                     </p>
-                    <p>{formatWeight(item.product?.weight_gram || 0)}</p>
                   </div>
-                  <p className="mt-2 text-lg font-bold text-amber-600">
-                    {formatCurrency(calculateSellPrice(item))}
-                  </p>
-                </div>
-              ))}
-              {filteredInventory.length === 0 && searchTerm && (
-                <div className="col-span-2 py-12 text-center text-gray-500">
-                  Produk tidak ditemukan
-                </div>
-              )}
-            </div>
+                ))}
+                {filteredInventory.length === 0 && !isLoading && (
+                  <div className="col-span-2 py-12 text-center text-gray-500">
+                    {searchTerm ? 'Produk tidak ditemukan' : 'Tidak ada produk tersedia'}
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -314,10 +353,34 @@ export function POSPage() {
             <div className="relative">
               <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
               <Input
+                value={customerSearchTerm}
+                onChange={(e) => setCustomerSearchTerm(e.target.value)}
                 placeholder="Cari pelanggan..."
                 className="pl-10"
               />
             </div>
+            {searchedCustomers && searchedCustomers.length > 0 && customerSearchTerm && (
+              <div className="mt-2 border rounded-lg max-h-32 overflow-y-auto">
+                {searchedCustomers.map((customer) => (
+                  <button
+                    key={customer.id}
+                    onClick={() => {
+                      setSelectedCustomer(customer);
+                      setCustomerSearchTerm(customer.name);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                  >
+                    <p className="font-medium">{customer.name}</p>
+                    <p className="text-sm text-gray-500">{customer.phone}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+            {selectedCustomer && (
+              <div className="mt-2 p-2 bg-amber-50 rounded-lg text-sm">
+                Pelanggan: <span className="font-medium">{selectedCustomer.name}</span>
+              </div>
+            )}
           </div>
 
           {/* Payment Method */}
@@ -409,6 +472,7 @@ export function POSPage() {
               variant="secondary"
               className="flex-1"
               onClick={() => setShowPaymentModal(false)}
+              disabled={isProcessing}
             >
               Batal
             </Button>
@@ -416,14 +480,27 @@ export function POSPage() {
               className="flex-1"
               onClick={handleProcessPayment}
               disabled={
-                paymentMethod === 'cash' && cashReceivedAmount < cart.total
+                (paymentMethod === 'cash' && cashReceivedAmount < cart.total) || isProcessing
               }
+              isLoading={isProcessing}
             >
               Proses Pembayaran
             </Button>
           </div>
         </div>
       </Modal>
+
+      {/* Receipt Modal */}
+      {receiptData && (
+        <ReceiptPreview
+          isOpen={showReceiptModal}
+          onClose={handleCloseReceipt}
+          transaction={receiptData.transaction}
+          items={receiptData.items}
+          payment={receiptData.payment}
+          cashReceived={receiptData.cashReceived}
+        />
+      )}
     </div>
   );
 }

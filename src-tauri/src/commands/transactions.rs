@@ -11,18 +11,24 @@ pub async fn create_transaction(
 ) -> Result<ApiResponse<Transaction>, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Local::now();
+    let today = now.format("%Y%m%d").to_string();
     let invoice_prefix = match request.r#type.as_str() {
         "sale" => "INV",
         "buyback" => "BUY",
         "exchange" => "EXC",
         _ => "TRX",
     };
-    let invoice_no = format!(
-        "{}-{}-{}",
-        invoice_prefix,
-        now.format("%Y%m%d"),
-        &id[..6].to_uppercase()
-    );
+
+    // Get sequential number for today
+    let pattern = format!("{}-{}-%", invoice_prefix, today);
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transactions WHERE invoice_no LIKE ?")
+        .bind(&pattern)
+        .fetch_one(&pool.0)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let sequence = count.0 + 1;
+    let invoice_no = format!("{}-{}-{:03}", invoice_prefix, today, sequence);
 
     // Calculate totals
     let subtotal: i32 = request.items.iter().map(|i| i.unit_price).sum();
@@ -78,15 +84,14 @@ pub async fn create_transaction(
         }
     }
 
-    let transaction: Transaction = sqlx::query_as!(
-        Transaction,
+    let transaction: Transaction = sqlx::query_as::<_, Transaction>(
         r#"
-        SELECT id, branch_id, user_id, customer_id, invoice_no, type as "type", subtotal, discount,
+        SELECT id, branch_id, user_id, customer_id, invoice_no, type, subtotal, discount,
                total_amount, notes, status, created_at
         FROM transactions WHERE id = ?
         "#,
-        id
     )
+    .bind(&id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -120,15 +125,14 @@ pub async fn process_payment(
     .map_err(|e| e.to_string())?;
 
     // Check if transaction is fully paid
-    let transaction: Transaction = sqlx::query_as!(
-        Transaction,
+    let transaction: Transaction = sqlx::query_as::<_, Transaction>(
         r#"
-        SELECT id, branch_id, user_id, customer_id, invoice_no, type as "type", subtotal, discount,
+        SELECT id, branch_id, user_id, customer_id, invoice_no, type, subtotal, discount,
                total_amount, notes, status, created_at
         FROM transactions WHERE id = ?
         "#,
-        request.transaction_id
     )
+    .bind(&request.transaction_id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -176,14 +180,13 @@ pub async fn process_payment(
         }
     }
 
-    let payment: Payment = sqlx::query_as!(
-        Payment,
+    let payment: Payment = sqlx::query_as::<_, Payment>(
         r#"
         SELECT id, transaction_id, method, amount, reference_no, bank_name, status, paid_at, created_at
         FROM payments WHERE id = ?
         "#,
-        id
     )
+    .bind(&id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -198,15 +201,14 @@ pub async fn void_transaction(
     reason: String,
 ) -> Result<ApiResponse<bool>, String> {
     // Get transaction
-    let transaction: Transaction = sqlx::query_as!(
-        Transaction,
+    let transaction: Transaction = sqlx::query_as::<_, Transaction>(
         r#"
-        SELECT id, branch_id, user_id, customer_id, invoice_no, type as "type", subtotal, discount,
+        SELECT id, branch_id, user_id, customer_id, invoice_no, type, subtotal, discount,
                total_amount, notes, status, created_at
         FROM transactions WHERE id = ?
         "#,
-        transaction_id
     )
+    .bind(&transaction_id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -270,44 +272,10 @@ pub async fn get_transactions(
 
     query.push_str(" ORDER BY created_at DESC LIMIT 100");
 
-    let rows = sqlx::query_as::<_, (
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        i32,
-        i32,
-        i32,
-        Option<String>,
-        String,
-        String,
-    )>(&query)
-    .fetch_all(&pool.0)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let transactions: Vec<Transaction> = rows
-        .into_iter()
-        .map(|row| Transaction {
-            id: row.0,
-            branch_id: row.1,
-            user_id: row.2,
-            customer_id: row.3,
-            invoice_no: row.4,
-            r#type: row.5,
-            subtotal: row.6,
-            discount: row.7,
-            total_amount: row.8,
-            notes: row.9,
-            status: row.10,
-            created_at: row.11,
-            customer: None,
-            items: None,
-            payments: None,
-        })
-        .collect();
+    let transactions: Vec<Transaction> = sqlx::query_as::<_, Transaction>(&query)
+        .fetch_all(&pool.0)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(ApiResponse::success(transactions))
 }
@@ -317,9 +285,8 @@ pub async fn get_transactions(
 pub async fn get_customers(
     pool: State<'_, DbPool>,
 ) -> Result<ApiResponse<Vec<Customer>>, String> {
-    let customers: Vec<Customer> = sqlx::query_as!(
-        Customer,
-        "SELECT id, name, phone, nik, address, notes, total_transactions, created_at FROM customers ORDER BY name"
+    let customers: Vec<Customer> = sqlx::query_as::<_, Customer>(
+        "SELECT id, name, phone, nik, address, notes, total_transactions, created_at FROM customers ORDER BY name",
     )
     .fetch_all(&pool.0)
     .await
@@ -352,11 +319,10 @@ pub async fn create_customer(
     .await
     .map_err(|e| e.to_string())?;
 
-    let customer: Customer = sqlx::query_as!(
-        Customer,
+    let customer: Customer = sqlx::query_as::<_, Customer>(
         "SELECT id, name, phone, nik, address, notes, total_transactions, created_at FROM customers WHERE id = ?",
-        id
     )
+    .bind(&id)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -371,8 +337,7 @@ pub async fn search_customer(
 ) -> Result<ApiResponse<Vec<Customer>>, String> {
     let search_pattern = format!("%{}%", query);
 
-    let customers: Vec<Customer> = sqlx::query_as!(
-        Customer,
+    let customers: Vec<Customer> = sqlx::query_as::<_, Customer>(
         r#"
         SELECT id, name, phone, nik, address, notes, total_transactions, created_at
         FROM customers
@@ -380,9 +345,9 @@ pub async fn search_customer(
         ORDER BY name
         LIMIT 10
         "#,
-        search_pattern,
-        search_pattern
     )
+    .bind(&search_pattern)
+    .bind(&search_pattern)
     .fetch_all(&pool.0)
     .await
     .map_err(|e| e.to_string())?;

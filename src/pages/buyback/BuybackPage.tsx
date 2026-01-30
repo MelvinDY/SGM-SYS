@@ -1,18 +1,15 @@
 import { useState } from 'react';
-import { User, Scale, Calculator, CreditCard } from 'lucide-react';
+import { User, Scale, Calculator, CreditCard, Loader2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Select } from '../../components/ui/Select';
 import { Modal } from '../../components/ui/Modal';
 import { formatCurrency, formatWeight, getPurityLabel, getGoldTypeLabel } from '../../lib/utils';
-
-// Gold buyback prices per gram
-const BUYBACK_PRICES: Record<string, Record<number, number>> = {
-  LM: { 999: 1150000, 750: 950000, 375: 475000 },
-  UBS: { 999: 1145000, 750: 945000, 375: 472000 },
-  Lokal: { 999: 1100000, 750: 880000, 375: 440000 },
-};
+import { useGoldPriceLookup } from '../../hooks/useGoldPrices';
+import { useCreateTransaction, useProcessPayment } from '../../hooks/useTransactions';
+import { useCreateCustomer } from '../../hooks/useCustomers';
+import { useAuth } from '../../hooks/useAuth';
 
 interface BuybackItem {
   goldType: 'LM' | 'UBS' | 'Lokal';
@@ -32,8 +29,15 @@ export function BuybackPage() {
   const [items, setItems] = useState<BuybackItem[]>([]);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank_transfer'>('cash');
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const pricePerGram = BUYBACK_PRICES[goldType]?.[purity] || 0;
+  const { user } = useAuth();
+  const { prices, getBuyPricePerGram, isLoading: pricesLoading } = useGoldPriceLookup();
+  const createTransaction = useCreateTransaction();
+  const processPayment = useProcessPayment();
+  const createCustomer = useCreateCustomer();
+
+  const pricePerGram = getBuyPricePerGram(goldType, purity) || 0;
   const weightNum = parseFloat(weight) || 0;
   const itemTotal = Math.round(weightNum * pricePerGram);
 
@@ -58,22 +62,69 @@ export function BuybackPage() {
     setItems(items.filter((_, i) => i !== index));
   };
 
-  const handleProcessBuyback = () => {
-    // TODO: Process buyback via Tauri command
-    console.log('Processing buyback...', {
-      customer: { name: customerName, phone: customerPhone, nik: customerNik },
-      items,
-      total: totalBuyback,
-      paymentMethod,
-    });
+  const handleProcessBuyback = async () => {
+    if (!user) return;
 
-    // Clear form
-    setItems([]);
-    setCustomerName('');
-    setCustomerPhone('');
-    setCustomerNik('');
-    setShowPaymentModal(false);
+    setIsProcessing(true);
+    try {
+      // Create customer if not exists
+      let customerId: string | undefined;
+      if (customerName) {
+        const customer = await createCustomer.mutateAsync({
+          name: customerName,
+          phone: customerPhone || undefined,
+          nik: customerNik || undefined,
+        });
+        customerId = customer.id;
+      }
+
+      // Create buyback transaction
+      const transaction = await createTransaction.mutateAsync({
+        request: {
+          type: 'buyback',
+          customer_id: customerId,
+          items: [], // No inventory items for buyback
+          buyback_items: items.map((item) => ({
+            gold_type: item.goldType,
+            gold_purity: item.purity,
+            weight_gram: item.weight,
+            unit_price: item.pricePerGram,
+          })),
+          subtotal: totalBuyback,
+          discount: 0,
+          tax: 0,
+          total: totalBuyback,
+        },
+        userId: user.id,
+        branchId: user.branch_id,
+      });
+
+      // Process payment
+      await processPayment.mutateAsync({
+        transaction_id: transaction.id,
+        method: paymentMethod,
+        amount: totalBuyback,
+      });
+
+      // Clear form
+      setItems([]);
+      setCustomerName('');
+      setCustomerPhone('');
+      setCustomerNik('');
+      setShowPaymentModal(false);
+    } catch (error) {
+      console.error('Buyback error:', error);
+      alert('Gagal memproses buyback. Silakan coba lagi.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
+
+  // Build buyback prices display from today's prices
+  const buybackPrices = prices?.filter((p) => p.gold_type === 'LM').map((p) => ({
+    purity: p.purity,
+    price: p.buy_price,
+  })) || [];
 
   return (
     <div className="space-y-6">
@@ -92,14 +143,24 @@ export function BuybackPage() {
               <CardTitle>Harga Buyback Hari Ini</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {Object.entries(BUYBACK_PRICES.LM).map(([p, price]) => (
-                  <div key={p} className="p-3 bg-gray-50 rounded-lg">
-                    <p className="text-sm text-gray-500">LM {getPurityLabel(parseInt(p))}</p>
-                    <p className="font-semibold text-blue-600">{formatCurrency(price)}/gr</p>
-                  </div>
-                ))}
-              </div>
+              {pricesLoading ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
+                </div>
+              ) : buybackPrices.length > 0 ? (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {buybackPrices.map((p) => (
+                    <div key={p.purity} className="p-3 bg-gray-50 rounded-lg">
+                      <p className="text-sm text-gray-500">LM {getPurityLabel(p.purity)}</p>
+                      <p className="font-semibold text-blue-600">{formatCurrency(p.price)}/gr</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-center text-gray-500 py-4">
+                  Belum ada harga buyback hari ini
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -175,14 +236,14 @@ export function BuybackPage() {
                   placeholder="0.00"
                 />
                 <div className="flex items-end">
-                  <Button onClick={handleAddItem} disabled={!weightNum} className="w-full">
+                  <Button onClick={handleAddItem} disabled={!weightNum || !pricePerGram} className="w-full">
                     Tambah
                   </Button>
                 </div>
               </div>
 
               {/* Price Preview */}
-              {weightNum > 0 && (
+              {weightNum > 0 && pricePerGram > 0 && (
                 <div className="mt-4 p-4 bg-blue-50 rounded-lg">
                   <div className="flex justify-between items-center">
                     <div>
@@ -368,10 +429,15 @@ export function BuybackPage() {
               variant="secondary"
               className="flex-1"
               onClick={() => setShowPaymentModal(false)}
+              disabled={isProcessing}
             >
               Batal
             </Button>
-            <Button className="flex-1" onClick={handleProcessBuyback}>
+            <Button
+              className="flex-1"
+              onClick={handleProcessBuyback}
+              isLoading={isProcessing}
+            >
               Konfirmasi Pembayaran
             </Button>
           </div>

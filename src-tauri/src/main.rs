@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    emaspos_temp_lib::run()
+    emaspos_lib::run()
 }

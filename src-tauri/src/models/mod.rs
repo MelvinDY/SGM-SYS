@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Branch {
     pub id: String,
     pub name: String,
@@ -11,7 +12,7 @@ pub struct Branch {
     pub updated_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
     pub id: String,
     pub branch_id: String,
@@ -52,7 +53,7 @@ impl From<User> for UserResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Customer {
     pub id: String,
     pub name: String,
@@ -64,7 +65,7 @@ pub struct Customer {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Category {
     pub id: String,
     pub name: String,
@@ -72,7 +73,7 @@ pub struct Category {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Product {
     pub id: String,
     pub category_id: String,
@@ -88,7 +89,7 @@ pub struct Product {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Inventory {
     pub id: String,
     pub product_id: String,
@@ -102,12 +103,13 @@ pub struct Inventory {
     pub notes: Option<String>,
     pub sold_at: Option<String>,
     pub created_at: String,
-    // Joined fields
+    // Joined fields - skip for sqlx
+    #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product: Option<Product>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct GoldPrice {
     pub id: String,
     pub date: String,
@@ -119,13 +121,14 @@ pub struct GoldPrice {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Transaction {
     pub id: String,
     pub branch_id: String,
     pub user_id: String,
     pub customer_id: Option<String>,
     pub invoice_no: String,
+    #[sqlx(rename = "type")]
     pub r#type: String, // "sale" | "buyback" | "exchange"
     pub subtotal: i32,
     pub discount: i32,
@@ -133,16 +136,19 @@ pub struct Transaction {
     pub notes: Option<String>,
     pub status: String, // "pending" | "completed" | "void"
     pub created_at: String,
-    // Joined fields
+    // Joined fields - skip for sqlx
+    #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub customer: Option<Customer>,
+    #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<TransactionItem>>,
+    #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payments: Option<Vec<Payment>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TransactionItem {
     pub id: String,
     pub transaction_id: String,
@@ -151,12 +157,13 @@ pub struct TransactionItem {
     pub unit_price: i32,
     pub subtotal: i32,
     pub gold_price_ref: Option<i32>,
-    // Joined
+    // Joined - skip for sqlx
+    #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inventory: Option<Inventory>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Payment {
     pub id: String,
     pub transaction_id: String,
@@ -169,15 +176,62 @@ pub struct Payment {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct SyncLog {
     pub id: String,
     pub table_name: String,
     pub record_id: String,
     pub action: String, // "insert" | "update" | "delete"
+    pub payload: Option<String>,
     pub synced: bool,
     pub synced_at: Option<String>,
+    pub error_message: Option<String>,
+    pub retry_count: i32,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SyncConfig {
+    pub id: String,
+    pub sf_client_id: Option<String>,
+    pub sf_client_secret: Option<String>,
+    pub sf_username: Option<String>,
+    pub sf_password: Option<String>,
+    pub sf_security_token: Option<String>,
+    pub sf_instance_url: Option<String>,
+    pub is_sandbox: bool,
+    pub sync_enabled: bool,
+    pub sync_interval_minutes: i32,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SyncMetadata {
+    pub table_name: String,
+    pub last_pull_at: Option<String>,
+    pub last_push_at: Option<String>,
+    pub last_full_sync_at: Option<String>,
+    pub records_pulled: i32,
+    pub records_pushed: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub is_connected: bool,
+    pub sync_enabled: bool,
+    pub last_sync_at: Option<String>,
+    pub pending_changes: i32,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncResult {
+    pub success: bool,
+    pub records_pushed: i32,
+    pub records_pulled: i32,
+    pub errors: Vec<String>,
+    pub completed_at: String,
 }
 
 // Request/Response types
@@ -191,6 +245,7 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub user: UserResponse,
     pub token: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,13 +291,28 @@ pub struct SetGoldPriceRequest {
     pub sell_price: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SaveSyncConfigRequest {
+    pub sf_client_id: String,
+    pub sf_client_secret: String,
+    pub sf_username: String,
+    pub sf_password: String,
+    pub sf_security_token: String,
+    pub sf_instance_url: Option<String>,
+    pub is_sandbox: bool,
+    pub sync_enabled: bool,
+    pub sync_interval_minutes: i32,
+}
+
 // Dashboard summary types
 #[derive(Debug, Serialize)]
 pub struct DashboardSummary {
     pub today_sales: i32,
     pub today_transactions: i32,
-    pub available_stock: i32,
+    pub total_stock: i32,
     pub total_weight: f64,
+    pub sales_change: f64,
+    pub transactions_change: f64,
 }
 
 #[derive(Debug, Serialize)]

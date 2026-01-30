@@ -6,10 +6,12 @@ use tauri::State;
 pub async fn get_dashboard_summary(
     pool: State<'_, DbPool>,
 ) -> Result<ApiResponse<DashboardSummary>, String> {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let now = chrono::Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
 
     // Today's sales
-    let sales: (Option<i64>,) = sqlx::query_as(
+    let today_sales: (Option<i64>,) = sqlx::query_as(
         r#"
         SELECT COALESCE(SUM(total_amount), 0)
         FROM transactions
@@ -21,8 +23,21 @@ pub async fn get_dashboard_summary(
     .await
     .map_err(|e| e.to_string())?;
 
+    // Yesterday's sales (for comparison)
+    let yesterday_sales: (Option<i64>,) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(total_amount), 0)
+        FROM transactions
+        WHERE type = 'sale' AND status = 'completed' AND DATE(created_at) = ?
+        "#,
+    )
+    .bind(&yesterday)
+    .fetch_one(&pool.0)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // Today's transaction count
-    let tx_count: (i64,) = sqlx::query_as(
+    let today_tx_count: (i64,) = sqlx::query_as(
         r#"
         SELECT COUNT(*)
         FROM transactions
@@ -30,6 +45,19 @@ pub async fn get_dashboard_summary(
         "#,
     )
     .bind(&today)
+    .fetch_one(&pool.0)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Yesterday's transaction count (for comparison)
+    let yesterday_tx_count: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM transactions
+        WHERE status = 'completed' AND DATE(created_at) = ?
+        "#,
+    )
+    .bind(&yesterday)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -54,11 +82,34 @@ pub async fn get_dashboard_summary(
     .await
     .map_err(|e| e.to_string())?;
 
+    // Calculate percentage changes
+    let today_sales_val = today_sales.0.unwrap_or(0) as f64;
+    let yesterday_sales_val = yesterday_sales.0.unwrap_or(0) as f64;
+    let sales_change = if yesterday_sales_val > 0.0 {
+        ((today_sales_val - yesterday_sales_val) / yesterday_sales_val) * 100.0
+    } else if today_sales_val > 0.0 {
+        100.0
+    } else {
+        0.0
+    };
+
+    let today_tx_val = today_tx_count.0 as f64;
+    let yesterday_tx_val = yesterday_tx_count.0 as f64;
+    let transactions_change = if yesterday_tx_val > 0.0 {
+        ((today_tx_val - yesterday_tx_val) / yesterday_tx_val) * 100.0
+    } else if today_tx_val > 0.0 {
+        100.0
+    } else {
+        0.0
+    };
+
     Ok(ApiResponse::success(DashboardSummary {
-        today_sales: sales.0.unwrap_or(0) as i32,
-        today_transactions: tx_count.0 as i32,
-        available_stock: stock_count.0 as i32,
+        today_sales: today_sales.0.unwrap_or(0) as i32,
+        today_transactions: today_tx_count.0 as i32,
+        total_stock: stock_count.0 as i32,
         total_weight: total_weight.0.unwrap_or(0.0),
+        sales_change: (sales_change * 10.0).round() / 10.0, // Round to 1 decimal
+        transactions_change: (transactions_change * 10.0).round() / 10.0,
     }))
 }
 
@@ -182,7 +233,12 @@ pub async fn get_daily_summary(
         "exchange_amount": exchange.0.unwrap_or(0),
         "cash_received": cash,
         "qris_received": qris,
-        "bank_transfer_received": bank_transfer
+        "bank_transfer_received": bank_transfer,
+        "payment_breakdown": {
+            "cash": cash,
+            "qris": qris,
+            "bank_transfer": bank_transfer
+        }
     });
 
     Ok(ApiResponse::success(summary))

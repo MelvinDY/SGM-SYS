@@ -8,16 +8,15 @@ pub async fn get_today_prices(
 ) -> Result<ApiResponse<Vec<GoldPrice>>, String> {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    let prices: Vec<GoldPrice> = sqlx::query_as!(
-        GoldPrice,
+    let prices: Vec<GoldPrice> = sqlx::query_as::<_, GoldPrice>(
         r#"
         SELECT id, date, gold_type, purity, buy_price, sell_price, source, created_at
         FROM gold_prices
         WHERE date = ?
         ORDER BY gold_type, purity DESC
         "#,
-        today
     )
+    .bind(&today)
     .fetch_all(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -52,17 +51,16 @@ pub async fn set_gold_price(
     .await
     .map_err(|e| e.to_string())?;
 
-    let price: GoldPrice = sqlx::query_as!(
-        GoldPrice,
+    let price: GoldPrice = sqlx::query_as::<_, GoldPrice>(
         r#"
         SELECT id, date, gold_type, purity, buy_price, sell_price, source, created_at
         FROM gold_prices
         WHERE date = ? AND gold_type = ? AND purity = ?
         "#,
-        today,
-        request.gold_type,
-        request.purity
     )
+    .bind(&today)
+    .bind(&request.gold_type)
+    .bind(request.purity)
     .fetch_one(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -77,8 +75,7 @@ pub async fn get_price_history(
     purity: i32,
     days: i32,
 ) -> Result<ApiResponse<Vec<GoldPrice>>, String> {
-    let prices: Vec<GoldPrice> = sqlx::query_as!(
-        GoldPrice,
+    let prices: Vec<GoldPrice> = sqlx::query_as::<_, GoldPrice>(
         r#"
         SELECT id, date, gold_type, purity, buy_price, sell_price, source, created_at
         FROM gold_prices
@@ -86,10 +83,10 @@ pub async fn get_price_history(
         ORDER BY date DESC
         LIMIT ?
         "#,
-        gold_type,
-        purity,
-        days
     )
+    .bind(&gold_type)
+    .bind(purity)
+    .bind(days)
     .fetch_all(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -102,16 +99,15 @@ pub async fn get_all_prices_for_date(
     pool: State<'_, DbPool>,
     date: String,
 ) -> Result<ApiResponse<Vec<GoldPrice>>, String> {
-    let prices: Vec<GoldPrice> = sqlx::query_as!(
-        GoldPrice,
+    let prices: Vec<GoldPrice> = sqlx::query_as::<_, GoldPrice>(
         r#"
         SELECT id, date, gold_type, purity, buy_price, sell_price, source, created_at
         FROM gold_prices
         WHERE date = ?
         ORDER BY gold_type, purity DESC
         "#,
-        date
     )
+    .bind(&date)
     .fetch_all(&pool.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -127,17 +123,16 @@ pub async fn get_price_for_calculation(
 ) -> Result<ApiResponse<Option<GoldPrice>>, String> {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    let price: Option<GoldPrice> = sqlx::query_as!(
-        GoldPrice,
+    let price: Option<GoldPrice> = sqlx::query_as::<_, GoldPrice>(
         r#"
         SELECT id, date, gold_type, purity, buy_price, sell_price, source, created_at
         FROM gold_prices
         WHERE date = ? AND gold_type = ? AND purity = ?
         "#,
-        today,
-        gold_type,
-        purity
     )
+    .bind(&today)
+    .bind(&gold_type)
+    .bind(purity)
     .fetch_optional(&pool.0)
     .await
     .map_err(|e| e.to_string())?;

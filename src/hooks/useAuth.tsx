@@ -1,5 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import type { User, Session } from '../types';
+import { login as apiLogin } from '../api/auth';
+import { isTauri } from '../lib/utils';
 
 interface AuthContextType {
   user: User | null;
@@ -12,7 +14,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Demo user for testing
+// Demo user for testing when not in Tauri environment
 const DEMO_USER: User = {
   id: '1',
   branch_id: '1',
@@ -51,8 +53,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string): Promise<boolean> => {
     setIsLoading(true);
     try {
-      // TODO: Replace with actual Tauri command
-      // For now, use demo authentication
+      // Try Tauri backend login first
+      if (isTauri()) {
+        const response = await apiLogin({ username, password });
+        if (response.success && response.data) {
+          const loginData = response.data;
+          const newSession: Session = {
+            user: loginData.user,
+            token: loginData.token,
+            expires_at: loginData.expires_at,
+          };
+          setSession(newSession);
+          setUser(loginData.user);
+          localStorage.setItem('emaspos_session', JSON.stringify(newSession));
+          return true;
+        }
+        return false;
+      }
+
+      // Fallback to demo authentication when not in Tauri
       if (username === 'admin' && password === 'admin') {
         const newSession: Session = {
           user: DEMO_USER,
